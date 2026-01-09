@@ -1,0 +1,198 @@
+
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { FREE_DELIVERY_MIN_CENTS, NON_MEMBER_DELIVERY_FEE_CENTS } from "@/lib/pricing";
+
+type Product = {
+  id: string;
+  name: string;
+  category: string;
+  price_cents: number;
+  image_url?: string | null;
+};
+
+type CartItem = Product & { qty: number };
+
+export default function HomePage() {
+  const [products, setProducts] = useState<Product[]>([]);
+  const [cart, setCart] = useState<CartItem[]>([]);
+  const [isMember, setIsMember] = useState(false); // later: lookup by phone/email
+  const [unit, setUnit] = useState("");
+  const [phone, setPhone] = useState("");
+  const [name, setName] = useState("");
+const [deliveryWindow, setDeliveryWindow] = useState("ASAP_30_60");
+const [requestedTimeLocal, setRequestedTimeLocal] = useState(""); // optional datetime-local
+
+
+  useEffect(() => {
+    fetch("/api/products")
+      .then((r) => r.json())
+      .then((d) => setProducts(d.products ?? []))
+      .catch(() => setProducts([]));
+  }, []);
+
+  const subtotal = useMemo(
+    () => cart.reduce((sum, i) => sum + i.price_cents * i.qty, 0),
+    [cart]
+  );
+
+  const deliveryFee = useMemo(() => {
+    if (isMember && subtotal >= FREE_DELIVERY_MIN_CENTS) return 0;
+    return cart.length ? NON_MEMBER_DELIVERY_FEE_CENTS : 0;
+  }, [isMember, subtotal, cart.length]);
+
+  const total = subtotal + deliveryFee;
+
+  function addToCart(p: Product) 
+    setCart((prev) => {
+      const found = prev.find((x) => x.id === p.id);
+      if (found) return prev.map((x) => (x.id === p.id ? { ...x, qty: x.qty + 1 } : x));
+      return [...prev, { ...p, qty: 1 }];
+    });
+  }
+
+  function decFromCart(id: string) {
+    setCart((prev) =>
+      prev.map((x) => (x.id === id ? { ...x, qty: x.qty - 1 } : x)).filter((x) => x.qty > 0)
+    );
+  }
+
+  async function placeOrder() {
+    if (!unit.trim()) return alert("Please enter your Park La Brea unit.");
+    if (!cart.length) return alert("Cart is empty.");
+
+    try {
+      const res = await fetch("/api/orders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          customer_name: name,
+          phone,
+          unit,
+          notes: "",
+          delivery_fee_cents: deliveryFee,
+          items: cart.map((i) => ({
+            product_id: i.id,
+            name: i.name,
+            qty: i.qty,
+            price_cents: i.price_cents,
+          })),
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) return alert(data?.error ?? "Order failed");
+
+      setCart([]);
+      alert(`Order placed! Status: ${data.order.status}`);
+    } catch {
+      alert("Network error placing order.");
+    }
+  }
+
+  return (
+    <main style={{ maxWidth: 900, margin: "0 auto", padding: 20, fontFamily: "system-ui" }}>
+      <h1>Quick Chips — Park La Brea</h1>
+      <p>Non-perishable snacks delivered fast. Park La Brea only.</p>
+
+      <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
+        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input type="checkbox" checked={isMember} onChange={(e) => setIsMember(e.target.checked)} />
+          Free Delivery Member
+        </label>
+        <a href="/subscribe">Subscribe ($9.99/mo)</a>
+      </div>
+
+      <section style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 16 }}>
+        <div>
+          <h2>Menu</h2>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 12 }}>
+            {products.map((p) => (
+              <button
+                key={p.id}
+                onClick={() => addToCart(p)}
+                style={{ padding: 12, border: "1px solid #ddd", borderRadius: 12, textAlign: "left" }}
+              >
+{p.image_url ? (
+  <img
+    src={p.image_url}
+    alt={p.name}
+    style={{
+      width: "100%",
+      height: 120,
+      objectFit: "cover",
+      borderRadius: 10,
+      marginBottom: 8,
+      border: "1px solid #eee",
+    }}
+    onError={(e) => {
+      // hide broken images gracefully
+      (e.currentTarget as HTMLImageElement).style.display = "none";
+    }}
+  />
+) : null}
+
+<div style={{ fontWeight: 700 }}>{p.name}</div>
+<div style={{ opacity: 0.7 }}>{p.category}</div>
+<div style={{ marginTop: 6 }}>${(p.price_cents / 100).toFixed(2)}</div>
+
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ border: "1px solid #ddd", borderRadius: 16, padding: 14 }}>
+          <h2>Cart</h2>
+          {cart.length === 0 ? (
+            <p style={{ opacity: 0.7 }}>Add items to start.</p>
+          ) : (
+            <>
+              {cart.map((i) => (
+                <div key={i.id} style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                  <div>
+                    <div style={{ fontWeight: 600 }}>{i.name}</div>
+                    <div style={{ opacity: 0.7 }}>
+                      ${(i.price_cents / 100).toFixed(2)} × {i.qty}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <button onClick={() => decFromCart(i.id)}>-</button>
+                    <button onClick={() => addToCart(i)}>+</button>
+                  </div>
+                </div>
+              ))}
+
+              <hr />
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span>Subtotal</span><span>${(subtotal / 100).toFixed(2)}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span>Delivery</span><span>${(deliveryFee / 100).toFixed(2)}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 800, marginTop: 6 }}>
+                <span>Total</span><span>${(total / 100).toFixed(2)}</span>
+              </div>
+
+              <div style={{ marginTop: 12, display: "grid", gap: 8 }}>
+                <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name (optional)" />
+                <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="Phone (optional)" />
+                <input value={unit} onChange={(e) => setUnit(e.target.value)} placeholder="Park La Brea Unit *" />
+                <button onClick={placeOrder} style={{ padding: 10, borderRadius: 12 }}>
+                  Place Order
+                </button>
+              </div>
+
+              {isMember && subtotal < FREE_DELIVERY_MIN_CENTS && (
+                <p style={{ marginTop: 10, opacity: 0.75 }}>
+                  Member perk: add ${((FREE_DELIVERY_MIN_CENTS - subtotal) / 100).toFixed(2)} more for free delivery.
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      </section>
+    </main>
+  );
+}
+

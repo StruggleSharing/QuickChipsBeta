@@ -1,0 +1,3 @@
+export const FREE_DELIVERY_MIN_CENTS = 1000; // $10.00
+export const NON_MEMBER_DELIVERY_FEE_CENTS = 399; // $3.99
+

@@ -1,0 +1,95 @@
+import { supabaseAdmin } from "@/lib/supabaseServer";
+
+function isAdmin(req: Request) {
+  const key = req.headers.get("x-admin-key");
+  return key && process.env.ADMIN_KEY && key === process.env.ADMIN_KEY;
+}
+
+export async function GET(req: Request) {
+  if (!isAdmin(req)) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("orders")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(200);
+
+  if (error) return Response.json({ error: error.message }, { status: 500 });
+  return Response.json({ orders: data ?? [] });
+}
+
+export async function PATCH(req: Request) {
+  if (!isAdmin(req)) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const body = await req.json().catch(() => null);
+  const id = (body?.id ?? "").toString();
+  const status = (body?.status ?? "").toString();
+
+  const allowed = ["NEW", "CONFIRMED", "OUT_FOR_DELIVERY", "DELIVERED", "CANCELED"];
+  if (!id) return Response.json({ error: "Missing id" }, { status: 400 });
+  if (!allowed.includes(status)) {
+    return Response.json({ error: "Invalid status" }, { status: 400 });
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("orders")
+    .update({ status })
+    .eq("id", id)
+    .select("*")
+    .single();
+
+  if (error) return Response.json({ error: error.message }, { status: 500 });
+  return Response.json({ order: data });
+}
+import { supabaseAdmin } from "@/lib/supabaseServer";
+
+function isAdmin(req: Request) {
+  const key = req.headers.get("x-admin-key");
+  return key && process.env.ADMIN_KEY && key === process.env.ADMIN_KEY;
+}
+
+export async function GET(req: Request) {
+  if (!isAdmin(req)) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("orders")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(200);
+
+  if (error) return Response.json({ error: error.message }, { status: 500 });
+  return Response.json({ orders: data ?? [] });
+}
+
+export async function PATCH(req: Request) {
+  if (!isAdmin(req)) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const body = await req.json().catch(() => null);
+  const id = (body?.id ?? "").toString();
+  const status = (body?.status ?? "").toString();
+
+  const allowed = ["NEW", "CONFIRMED", "OUT_FOR_DELIVERY", "DELIVERED", "CANCELED"];
+  if (!id) return Response.json({ error: "Missing id" }, { status: 400 });
+  if (!allowed.includes(status)) {
+    return Response.json({ error: "Invalid status" }, { status: 400 });
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("orders")
+    .update({ status })
+    .eq("id", id)
+    .select("*")
+    .single();
+
+  if (error) return Response.json({ error: error.message }, { status: 500 });
+  return Response.json({ order: data });
+}
+
