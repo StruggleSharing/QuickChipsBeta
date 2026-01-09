@@ -1,121 +1,164 @@
-import { stripe } from "@/lib/stripe";
-import { supabaseAdmin } from "@/lib/supabaseServer";
+// app/api/stripe/webhook/route.ts
 import Stripe from "stripe";
+import { headers } from "next/headers";
+import { supabaseAdmin } from "@/lib/supabaseServer";
+import { stripe } from "@/lib/stripe";
 
 export const runtime = "nodejs";
 
+// Stripe requires the raw body to verify signatures.
+// Next.js App Router gives us req.text() which preserves raw payload.
 export async function POST(req: Request) {
-  const sig = req.headers.get("stripe-signature");
-  const secret = process.env.STRIPE_WEBHOOK_SECRET!;
+  const sig = (await headers()).get("stripe-signature");
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
-  if (!sig) return new Response("Missing stripe-signature", { status: 400 });
-
-  const rawBody = await req.text();
+  if (!webhookSecret) {
+    return Response.json({ error: "Missing STRIPE_WEBHOOK_SECRET" }, { status: 500 });
+  }
+  if (!sig) {
+    return Response.json({ error: "Missing stripe-signature header" }, { status: 400 });
+  }
 
   let event: Stripe.Event;
   try {
-    event = stripe.webhooks.constructEvent(rawBody, sig, secret);
+    const rawBody = await req.text();
+    event = stripe.webhooks.constructEvent(rawBody, sig, webhookSecret);
   } catch (err: any) {
-    return new Response(`Webhook Error: ${err.message}`, { status: 400 });
-  }
-
-  // Helper: upsert subscription row
-  async function upsertSub(params: {
-    contact: string | null;
-    plan: "FREE_DELIVERY" | "SNACK_BOX";
-    stripe_customer_id?: string | null;
-    stripe_subscription_id?: string | null;
-    status: "inactive" | "active" | "past_due" | "canceled";
-    current_period_end?: string | null;
-  }) {
-    const { contact, plan, stripe_customer_id, stripe_subscription_id, status, current_period_end } = params;
-
-    if (!stripe_subscription_id) return;
-
-    const { error } = await supabaseAdmin
-      .from("subscriptions")
-      .upsert(
-        {
-          contact,
-          plan,
-          stripe_customer_id: stripe_customer_id ?? null,
-          stripe_subscription_id,
-          status,
-          current_period_end: current_period_end ?? null,
-        },
-        { onConflict: "stripe_subscription_id" }
-      );
-
-    if (error) throw error;
+    return Response.json(
+      { error: "Webhook signature verification failed", details: err?.message ?? String(err) },
+      { status: 400 }
+    );
   }
 
   try {
     switch (event.type) {
+      /**
+       * Checkout completion: best place to "create/activate" a subscription record
+       * because we have session.metadata.contact from your /api/checkout creation.
+       */
       case "checkout.session.completed": {
         const session = event.data.object as Stripe.Checkout.Session;
-        // session.subscription can be string | Subscription | null
+
         const subscriptionId =
-          typeof session.subscription === "string" ? session.subscription : session.subscription?.id ?? null;
+          typeof session.subscription === "string"
+            ? session.subscription
+            : session.subscription?.id ?? null;
 
         const customerId =
-          typeof session.customer === "string" ? session.customer : session.customer?.id ?? null;
+          typeof session.customer === "string"
+            ? session.customer
+            : session.customer?.id ?? null;
 
-        const contact = (session.metadata?.contact ?? null) as string | null;
-        const plan = ((session.metadata?.plan ?? "FREE_DELIVERY") as any) as "FREE_DELIVERY" | "SNACK_BOX";
+        const contact = (session.metadata?.contact ?? "").trim();
+        const plan = (session.metadata?.plan ?? "FREE_DELIVERY").trim();
 
-        if (subscriptionId) {
-          // fetch subscription for period end + status
-          const sub = await stripe.subscriptions.retrieve(subscriptionId);
-          await upsertSub({
-            contact,
-            plan,
-            stripe_customer_id: customerId,
-            stripe_subscription_id: subscriptionId,
-            status:
-              sub.status === "active"
-                ? "active"
-                : sub.status === "past_due"
-                ? "past_due"
-                : sub.status === "canceled"
-                ? "canceled"
-                : "inactive",
-            current_period_end: sub.current_period_end ? new Date(sub.current_period_end * 1000).toISOString() : null,
-          });
-        }
+        if (!subscriptionId || !customerId || !contact) break;
+
+        // Retrieve subscription to get accurate status + current_period_end
+        const sub = await stripe.subscriptions.retrieve(subscriptionId);
+
+        await upsertSubscription({
+          stripe_customer_id: customerId,
+          stripe_subscription_id: subscriptionId,
+          status: sub.status,
+          plan: (sub.metadata?.plan ?? plan) || "FREE_DELIVERY",
+          contact,
+          current_period_end: sub.current_period_end
+            ? new Date(sub.current_period_end * 1000).toISOString()
+            : null,
+        });
+
         break;
       }
 
-      case "customer.subscription.updated":
+      /**
+       * Subscription updates: keeps status/period_end synced over time.
+       */
+      case "customer.subscription.updated": {
+        const sub = event.data.object as Stripe.Subscription;
+
+        const customerId = typeof sub.customer === "string" ? sub.customer : sub.customer.id;
+        const contact = (sub.metadata?.contact ?? "").trim();
+        const plan = (sub.metadata?.plan ?? "FREE_DELIVERY").trim();
+
+        if (!sub.id || !customerId || !contact) break;
+
+        await upsertSubscription({
+          stripe_customer_id: customerId,
+          stripe_subscription_id: sub.id,
+          status: sub.status,
+          plan: plan || "FREE_DELIVERY",
+          contact,
+          current_period_end: sub.current_period_end
+            ? new Date(sub.current_period_end * 1000).toISOString()
+            : null,
+        });
+
+        break;
+      }
+
+      /**
+       * Subscription deleted: mark canceled.
+       */
       case "customer.subscription.deleted": {
         const sub = event.data.object as Stripe.Subscription;
-        const contact = (sub.metadata?.contact ?? null) as string | null;
-        const plan = ((sub.metadata?.plan ?? "FREE_DELIVERY") as any) as "FREE_DELIVERY" | "SNACK_BOX";
 
-        await upsertSub({
-          contact,
-          plan,
-          stripe_customer_id: typeof sub.customer === "string" ? sub.customer : sub.customer.id,
+        const customerId = typeof sub.customer === "string" ? sub.customer : sub.customer.id;
+        const contact = (sub.metadata?.contact ?? "").trim();
+        const plan = (sub.metadata?.plan ?? "FREE_DELIVERY").trim();
+
+        if (!sub.id || !customerId || !contact) break;
+
+        await upsertSubscription({
+          stripe_customer_id: customerId,
           stripe_subscription_id: sub.id,
-          status:
-            sub.status === "active"
-              ? "active"
-              : sub.status === "past_due"
-              ? "past_due"
-              : sub.status === "canceled"
-              ? "canceled"
-              : "inactive",
-          current_period_end: sub.current_period_end ? new Date(sub.current_period_end * 1000).toISOString() : null,
+          status: "canceled",
+          plan: plan || "FREE_DELIVERY",
+          contact,
+          current_period_end: sub.current_period_end
+            ? new Date(sub.current_period_end * 1000).toISOString()
+            : null,
         });
+
         break;
       }
 
       default:
+        // Ignore other events
         break;
     }
-  } catch (e: any) {
-    return new Response(`Webhook handler failed: ${e.message}`, { status: 500 });
-  }
 
-  return new Response("ok", { status: 200 });
+    return Response.json({ received: true });
+  } catch (err: any) {
+    return Response.json(
+      { error: "Webhook handler failed", details: err?.message ?? String(err) },
+      { status: 500 }
+    );
+  }
+}
+
+async function upsertSubscription(input: {
+  stripe_customer_id: string;
+  stripe_subscription_id: string;
+  status: string;
+  plan: string;
+  contact: string;
+  current_period_end: string | null;
+}) {
+  const { error } = await supabaseAdmin
+    .from("subscriptions")
+    .upsert(
+      {
+        stripe_customer_id: input.stripe_customer_id,
+        stripe_subscription_id: input.stripe_subscription_id,
+        status: input.status,
+        plan: input.plan,
+        contact: input.contact,
+        current_period_end: input.current_period_end,
+      },
+      { onConflict: "stripe_subscription_id" }
+    );
+
+  if (error) throw new Error(error.message);
 }
 
